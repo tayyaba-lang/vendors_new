@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Vendor Locator</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+
+<style>
+  body { margin: 0; font-family: Arial, sans-serif; }
+
+  #controls {
+    padding: 10px;
+    background: #f2f2f2;
+  }
+
+  #map {
+    height: 80vh;
+  }
+
+  input, button {
+    padding: 6px;
+    margin: 4px;
+  }
+
+  .legend {
+    background: white;
+    padding: 8px;
+    font-size: 12px;
+    line-height: 18px;
+    border: 1px solid #ccc;
+    box-shadow: 0 0 5px rgba(0,0,0,0.3);
+  }
+</style>
+</head>
+
+<body>
+
+<div id="controls">
+  <input id="vendorType" placeholder="Vendor trade (optional)">
+  <input id="radius" type="number" value="20" placeholder="Radius (km)">
+  <input id="address" placeholder="Enter address" style="width:300px">
+  <button onclick="searchAddress()">Search</button>
+</div>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+<script>
+/* =====================
+   MAP INIT
+===================== */
+var map = L.map('map').setView([35.5, -81.0], 9);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '© OpenStreetMap contributors'
+}).addTo(map);
+
+/* =====================
+   GLOBALS
+===================== */
+var vendors = [];
+var markers = L.layerGroup().addTo(map);
+var bufferCircle = null;
+
+/* =====================
+   TRADE COLORS
+===================== */
+const tradeColors = {};
+const palette = [
+  "#1f78b4","#33a02c","#e31a1c","#ff7f00",
+  "#6a3d9a","#b15928","#a6cee3","#b2df8a",
+  "#fb9a99","#fdbf6f","#cab2d6","#ffff99"
+];
+let colorIndex = 0;
+
+function getColorForTrade(trade) {
+  if (!trade) return "#999";
+  if (!tradeColors[trade]) {
+    tradeColors[trade] = palette[colorIndex % palette.length];
+    colorIndex++;
+  }
+  return tradeColors[trade];
+}
+
+/* =====================
+   LOAD VENDORS
+===================== */
+fetch('./vendors.json')
+  .then(res => res.json())
+  .then(data => {
+    vendors = data;
+    vendors.forEach(v => addVendorMarker(v));
+    addLegend();
+  })
+  .catch(err => {
+    console.error(err);
+    alert("Use Live Server to load vendors.json");
+  });
+
+function addVendorMarker(v) {
+  L.circleMarker([v.Lat, v.Long], {
+    radius: 5,
+    fillColor: getColorForTrade(v.Trade),
+    color: "#333",
+    weight: 1,
+    fillOpacity: 0.9
+  })
+  .bindPopup(`
+    <b>${v.Company}</b><br>
+    Trade: ${v.Trade}<br>
+    ${v.City}, ${v.State}<br>
+    📞 ${v["Contact #"] || "N/A"}<br>
+    ✉️ ${v.Email || ""}
+  `)
+  .addTo(markers);
+}
+
+/* =====================
+   DISTANCE FUNCTION
+===================== */
+function distanceKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = (lat2-lat1)*Math.PI/180;
+  const dLon = (lon2-lon1)*Math.PI/180;
+  const a =
+    Math.sin(dLat/2)**2 +
+    Math.cos(lat1*Math.PI/180) *
+    Math.cos(lat2*Math.PI/180) *
+    Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+/* =====================
+   SEARCH ADDRESS
+===================== */
+function searchAddress() {
+
+  var address = document.getElementById("address").value.trim();
+  var radius = parseFloat(document.getElementById("radius").value) || 20;
+  var vendorType = document.getElementById("vendorType").value.trim().toLowerCase();
+
+  if (!address) {
+    alert("Enter an address");
+    return;
+  }
+
+  fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}`)
+    .then(res => res.json())
+    .then(results => {
+
+      if (!results.length) {
+        alert("Address not found");
+        return;
+      }
+
+      var lat = parseFloat(results[0].lat);
+      var lon = parseFloat(results[0].lon);
+
+      map.setView([lat, lon], 14);
+
+      if (bufferCircle) map.removeLayer(bufferCircle);
+      bufferCircle = L.circle([lat, lon], {
+        radius: radius * 1000,
+        color: "blue",
+        fillOpacity: 0.1
+      }).addTo(map);
+
+      markers.clearLayers();
+
+      vendors.forEach(v => {
+
+        if (vendorType && v.Trade.toLowerCase() !== vendorType) return;
+
+        var d = distanceKm(lat, lon, v.Lat, v.Long);
+
+        if (d <= radius) {
+          L.circleMarker([v.Lat, v.Long], {
+            radius: 6,
+            fillColor: getColorForTrade(v.Trade),
+            color: "#000",
+            weight: 1,
+            fillOpacity: 1
+          })
+          .bindPopup(`
+            <b>${v.Company}</b><br>
+            Trade: ${v.Trade}<br>
+            Distance: ${d.toFixed(2)} km
+          `)
+          .addTo(markers);
+        }
+      });
+
+      addLegend(); // 🔑 refresh legend after search
+    });
+}
+
+/* =====================
+   LEGEND
+===================== */
+var legendControl = null;
+
+function addLegend() {
+
+  if (legendControl) {
+    map.removeControl(legendControl);
+  }
+
+  legendControl = L.control({ position: "bottomright" });
+
+  legendControl.onAdd = function () {
+    var div = L.DomUtil.create("div", "legend");
+    L.DomEvent.disableClickPropagation(div);
+
+    div.innerHTML = "<b>Trades</b><br>";
+
+    for (let trade in tradeColors) {
+      div.innerHTML += `
+        <div>
+          <span style="
+            display:inline-block;
+            width:12px;
+            height:12px;
+            background:${tradeColors[trade]};
+            margin-right:6px;
+          "></span>${trade}
+        </div>`;
+    }
+    return div;
+  };
+
+  legendControl.addTo(map);
+}
+</script>
+
+</body>
+</html>
